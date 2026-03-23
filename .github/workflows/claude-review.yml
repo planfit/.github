@@ -1,0 +1,442 @@
+name: Claude Code Review (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      # --- Event context (caller가 전달) ---
+      trigger_action:
+        description: 'Event action: opened, synchronize'
+        required: true
+        type: string
+      pr_number:
+        description: 'PR number'
+        required: true
+        type: number
+      pr_title:
+        description: 'PR title (skip 판단용)'
+        required: true
+        type: string
+      repo_name:
+        description: 'Repository name'
+        required: true
+        type: string
+      repo_owner:
+        description: 'Repository owner'
+        required: true
+        type: string
+
+      # --- Customization ---
+      exclude_patterns:
+        description: 'grep -E pattern for file exclusion'
+        required: false
+        type: string
+        default: '\.(json|svg|png|jpg|gif)$|package-lock\.json'
+      additional_exclude:
+        description: 'Additional exclude pattern (appended with |)'
+        required: false
+        type: string
+        default: ''
+      model:
+        description: 'Claude model to use'
+        required: false
+        type: string
+        default: 'claude-sonnet-4-6'
+      max_turns:
+        description: 'Max turns for review'
+        required: false
+        type: number
+        default: 20
+      review_language:
+        description: 'Review language (ko or en)'
+        required: false
+        type: string
+        default: 'ko'
+      diff_size_limit:
+        description: 'Max diff size in bytes'
+        required: false
+        type: number
+        default: 204800
+
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      CLAUDE_CODE_OAUTH_TOKEN_BACKUP:
+        required: false
+
+jobs:
+  auto-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+
+    concurrency:
+      group: claude-review-${{ inputs.repo_name }}-${{ inputs.pr_number }}
+      cancel-in-progress: true
+
+    steps:
+      # Step 1: Skip 조건 체크
+      - name: Check skip conditions
+        id: skip-check
+        run: |
+          TITLE="${{ inputs.pr_title }}"
+          if echo "$TITLE" | grep -qiE 'WIP|DRAFT|DO NOT MERGE|No Review'; then
+            echo "should_skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Step 2: Checkout
+      - name: Checkout
+        if: steps.skip-check.outputs.should_skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Step 3: Diff 추출 + 파일 필터링
+      - name: Prepare PR diff
+        if: steps.skip-check.outputs.should_skip != 'true'
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUM="${{ inputs.pr_number }}"
+
+          # 제외 패턴 결합
+          EXCLUDE="${{ inputs.exclude_patterns }}"
+          ADDITIONAL="${{ inputs.additional_exclude }}"
+          [ -n "$ADDITIONAL" ] && EXCLUDE="${EXCLUDE}|${ADDITIONAL}"
+
+          # 변경 파일 목록 (제외 패턴 필터링)
+          gh pr diff "$PR_NUM" --name-only | \
+            grep -v -E "$EXCLUDE" \
+            > /tmp/changed-files.txt || true
+
+          FILE_COUNT=$(wc -l < /tmp/changed-files.txt | tr -d ' ')
+          echo "file_count=$FILE_COUNT" >> "$GITHUB_OUTPUT"
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+          # 전체 diff 추출 (사이즈 제한)
+          gh pr diff "$PR_NUM" > /tmp/pr-diff-full.txt
+          head -c ${{ inputs.diff_size_limit }} /tmp/pr-diff-full.txt > /tmp/pr-diff.txt
+
+          DIFF_SIZE=$(wc -c < /tmp/pr-diff-full.txt | tr -d ' ')
+          echo "diff_size=$DIFF_SIZE" >> "$GITHUB_OUTPUT"
+
+      # Step 4: 리뷰 규칙 파일 로드
+      - name: Load review rules
+        if: steps.skip-check.outputs.should_skip != 'true' && steps.prepare.outputs.skip != 'true'
+        id: load-rules
+        run: |
+          RULES_FILE=".github/claude-review-rules.md"
+          if [ -f "$RULES_FILE" ]; then
+            cp "$RULES_FILE" /tmp/review-rules.md
+            echo "has_rules=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_rules=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Step 5: 이전 Claude 리뷰 스레드 resolve (synchronize 시에만)
+      - name: Resolve previous Claude reviews
+        if: >
+          inputs.trigger_action == 'synchronize' &&
+          steps.skip-check.outputs.should_skip != 'true' &&
+          steps.prepare.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUM="${{ inputs.pr_number }}"
+          OWNER="${{ inputs.repo_owner }}"
+          REPO="${{ inputs.repo_name }}"
+
+          # Fetch unresolved review threads with first comment body
+          THREADS=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!, $pr: Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $pr) {
+                  reviewThreads(first: 100) {
+                    nodes {
+                      id
+                      isResolved
+                      comments(first: 1) {
+                        nodes { body }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ' -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUM")
+
+          # Filter Claude threads (by marker) and resolve
+          echo "$THREADS" | jq -r '
+            .data.repository.pullRequest.reviewThreads.nodes[]
+            | select(.isResolved == false)
+            | select(.comments.nodes[0].body | contains("<!-- claude-review -->"))
+            | .id
+          ' | while read -r THREAD_ID; do
+            [ -z "$THREAD_ID" ] && continue
+            gh api graphql -f query='
+              mutation($threadId: ID!) {
+                resolveReviewThread(input: {threadId: $threadId}) {
+                  thread { id isResolved }
+                }
+              }
+            ' -f threadId="$THREAD_ID" || true
+          done
+
+      # Step 6: Claude Code Review (Primary Token)
+      - name: Run Claude Code Review
+        id: claude-review
+        if: steps.skip-check.outputs.should_skip != 'true' && steps.prepare.outputs.skip != 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: >-
+            --model ${{ inputs.model }}
+            --max-turns ${{ inputs.max_turns }}
+            --allowedTools
+            "mcp__github__create_pending_pull_request_review,mcp__github__add_comment_to_pending_review,mcp__github__submit_pending_pull_request_review,Read,Glob,Grep"
+          prompt: |
+            PR #${{ inputs.pr_number }}의 코드를 리뷰하세요.
+
+            ## 입력 파일
+            - `/tmp/pr-diff.txt` — PR diff
+            - `/tmp/changed-files.txt` — 리뷰 대상 파일 목록
+            ${{ steps.load-rules.outputs.has_rules == 'true' && '- `/tmp/review-rules.md` — 이 레포의 리뷰 규칙' || '' }}
+
+            ## 작업 순서 (순서대로 실행하라)
+            1. `/tmp/pr-diff.txt`를 Read로 읽어 변경사항을 파악하라
+
+            2. `/tmp/changed-files.txt`의 각 파일을 순서대로 Read로 읽어라
+               - 각 파일마다 코드 품질, 버그, 보안 취약점을 검토하라
+               - 최소 N개 파일은 반드시 읽어야 함 (N = 변경된 파일 수)
+
+            3. ${{ steps.load-rules.outputs.has_rules == 'true' && '/tmp/review-rules.md를 Read로 읽어 레포 고유 리뷰 규칙을 확인하고 적용하라' || 'CLAUDE.md와 프로젝트 컨벤션을 기반으로 리뷰하라' }}
+
+            4. 코멘트 작성 전 자기 검증 (각 이슈마다 반드시 수행하라):
+               - "이 지적이 틀릴 수 있는 이유"를 먼저 생각하라
+               - 아키텍처/데이터 구조 변경 제안: 서버 API 설계를 모르므로 지적하지 마라
+               - 동시성/race condition: 기존 보호 메커니즘을 코드에서 확인하고, 구체적 우회 시나리오를 설명할 수 없으면 지적하지 마라
+               - 확신이 낮은 이슈는 제외하라
+
+            5. 검증을 통과한 이슈가 하나라도 있으면:
+               a. `mcp__github__create_pending_pull_request_review`로 pending review 생성
+                  - owner: "${{ inputs.repo_owner }}"
+                  - repo: "${{ inputs.repo_name }}"
+                  - pullNumber: ${{ inputs.pr_number }}
+               b. 각 이슈마다 `mcp__github__add_comment_to_pending_review`로 코멘트 추가
+               c. 모든 코멘트 추가 후 `mcp__github__submit_pending_pull_request_review`로 **반드시 1번만** 제출
+                  - event: "COMMENT"
+                  - body: "🤖 Claude Code Review 완료"
+
+            6. 이슈가 없으면 리뷰를 생성하지 않음 (아무 도구도 호출하지 마라)
+
+            ## 중복 방지 (엄격히 지킬 것)
+            - 같은 파일에서 같은 유형 이슈 → 첫 발생 위치에 1개만 코멘트, 본문에 "Line X, Y에서도 동일" 나열
+            - 여러 파일에서 같은 패턴 → 대표 1개만 코멘트, "파일 X, Y에서도 동일한 이슈" 언급
+            - `submit_pending_pull_request_review`는 반드시 1번만 호출하라
+
+            ## 코멘트 형식
+            - 🔴 **Critical**: 버그, 보안, 크래시
+            - 🟡 **Important**: 타입 안전성, 성능
+            - 🟢 **Suggestion**: 가독성, 스타일
+            - 수정 제안 시 ```suggestion 블록 사용
+            - 모든 코멘트 본문 끝에 반드시 `<!-- claude-review -->` 마커를 포함하라 (식별용)
+
+            ## 규칙
+            - ${{ inputs.review_language == 'ko' && '한국어로 작성' || 'Write in English' }}
+            - 진짜 문제만 지적 (불필요한 코멘트/칭찬 금지)
+            - 요약 코멘트 작성 금지 (인라인만)
+
+      # Step 7: Backup Token Fallback
+      - name: Run Claude Code Review (backup)
+        id: claude-review-backup
+        if: >
+          steps.claude-review.outcome == 'failure' &&
+          steps.skip-check.outputs.should_skip != 'true' &&
+          steps.prepare.outputs.skip != 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_BACKUP }}
+          claude_args: >-
+            --model ${{ inputs.model }}
+            --max-turns ${{ inputs.max_turns }}
+            --allowedTools
+            "mcp__github__create_pending_pull_request_review,mcp__github__add_comment_to_pending_review,mcp__github__submit_pending_pull_request_review,Read,Glob,Grep"
+          prompt: |
+            PR #${{ inputs.pr_number }}의 코드를 리뷰하세요.
+
+            ## 입력 파일
+            - `/tmp/pr-diff.txt` — PR diff
+            - `/tmp/changed-files.txt` — 리뷰 대상 파일 목록
+            ${{ steps.load-rules.outputs.has_rules == 'true' && '- `/tmp/review-rules.md` — 이 레포의 리뷰 규칙' || '' }}
+
+            ## 작업 순서 (순서대로 실행하라)
+            1. `/tmp/pr-diff.txt`를 Read로 읽어 변경사항을 파악하라
+
+            2. `/tmp/changed-files.txt`의 각 파일을 순서대로 Read로 읽어라
+               - 각 파일마다 코드 품질, 버그, 보안 취약점을 검토하라
+               - 최소 N개 파일은 반드시 읽어야 함 (N = 변경된 파일 수)
+
+            3. ${{ steps.load-rules.outputs.has_rules == 'true' && '/tmp/review-rules.md를 Read로 읽어 레포 고유 리뷰 규칙을 확인하고 적용하라' || 'CLAUDE.md와 프로젝트 컨벤션을 기반으로 리뷰하라' }}
+
+            4. 코멘트 작성 전 자기 검증 (각 이슈마다 반드시 수행하라):
+               - "이 지적이 틀릴 수 있는 이유"를 먼저 생각하라
+               - 아키텍처/데이터 구조 변경 제안: 서버 API 설계를 모르므로 지적하지 마라
+               - 동시성/race condition: 기존 보호 메커니즘을 코드에서 확인하고, 구체적 우회 시나리오를 설명할 수 없으면 지적하지 마라
+               - 확신이 낮은 이슈는 제외하라
+
+            5. 검증을 통과한 이슈가 하나라도 있으면:
+               a. `mcp__github__create_pending_pull_request_review`로 pending review 생성
+                  - owner: "${{ inputs.repo_owner }}"
+                  - repo: "${{ inputs.repo_name }}"
+                  - pullNumber: ${{ inputs.pr_number }}
+               b. 각 이슈마다 `mcp__github__add_comment_to_pending_review`로 코멘트 추가
+               c. 모든 코멘트 추가 후 `mcp__github__submit_pending_pull_request_review`로 **반드시 1번만** 제출
+                  - event: "COMMENT"
+                  - body: "🤖 Claude Code Review 완료"
+
+            6. 이슈가 없으면 리뷰를 생성하지 않음 (아무 도구도 호출하지 마라)
+
+            ## 중복 방지 (엄격히 지킬 것)
+            - 같은 파일에서 같은 유형 이슈 → 첫 발생 위치에 1개만 코멘트, 본문에 "Line X, Y에서도 동일" 나열
+            - 여러 파일에서 같은 패턴 → 대표 1개만 코멘트, "파일 X, Y에서도 동일한 이슈" 언급
+            - `submit_pending_pull_request_review`는 반드시 1번만 호출하라
+
+            ## 코멘트 형식
+            - 🔴 **Critical**: 버그, 보안, 크래시
+            - 🟡 **Important**: 타입 안전성, 성능
+            - 🟢 **Suggestion**: 가독성, 스타일
+            - 수정 제안 시 ```suggestion 블록 사용
+            - 모든 코멘트 본문 끝에 반드시 `<!-- claude-review -->` 마커를 포함하라 (식별용)
+
+            ## 규칙
+            - ${{ inputs.review_language == 'ko' && '한국어로 작성' || 'Write in English' }}
+            - 진짜 문제만 지적 (불필요한 코멘트/칭찬 금지)
+            - 요약 코멘트 작성 금지 (인라인만)
+
+      # Step 8: Summary sticky comment
+      - name: Post summary comment
+        if: >
+          always() &&
+          steps.skip-check.outputs.should_skip != 'true' &&
+          steps.prepare.outputs.skip != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const MARKER = '<!-- claude-code-review-summary -->';
+            const prNumber = ${{ inputs.pr_number }};
+            const primaryOutcome = '${{ steps.claude-review.outcome }}';
+            const backupOutcome = '${{ steps.claude-review-backup.outcome }}';
+            const outcome = primaryOutcome === 'success' ? 'success' :
+                           backupOutcome === 'success' ? 'success' : 'failure';
+            const fileCount = '${{ steps.prepare.outputs.file_count }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const usedBackup = primaryOutcome !== 'success' && backupOutcome === 'success';
+
+            let status, detail;
+            if (outcome === 'success') {
+              status = '✅ 리뷰 완료';
+              detail = usedBackup
+                ? '인라인 코멘트를 확인해주세요. (backup 토큰 사용)'
+                : '인라인 코멘트를 확인해주세요.';
+            } else {
+              status = '⚠️ 리뷰 실패';
+              detail = 'Rate limit 또는 턴 제한 초과. 수동 리뷰가 필요합니다.';
+            }
+
+            const body = [
+              MARKER,
+              `### 🤖 Claude Code Review — ${status}`,
+              '',
+              `리뷰 대상: ${fileCount}개 파일 | ${detail}`,
+              '',
+              `<sub>[로그](${runUrl})</sub>`,
+            ].join('\n');
+
+            // Sticky: 기존 코멘트 업데이트 또는 새로 생성
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body?.includes(MARKER));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }
+
+      # Step 9: Skip comment (리뷰 대상 없을 때)
+      - name: Post skip comment
+        if: >
+          steps.skip-check.outputs.should_skip == 'true' ||
+          steps.prepare.outputs.skip == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const MARKER = '<!-- claude-code-review-summary -->';
+            const prNumber = ${{ inputs.pr_number }};
+            const shouldSkip = '${{ steps.skip-check.outputs.should_skip }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const reason = shouldSkip === 'true'
+              ? 'PR 제목에 WIP/DRAFT/DO NOT MERGE/No Review가 포함되어 있습니다.'
+              : '리뷰 대상 파일이 없습니다 (번역/이미지/스크립트만 변경).';
+
+            const body = [
+              MARKER,
+              '### 🤖 Claude Code Review — ⏭️ 리뷰 건너뜀',
+              '',
+              reason,
+              '',
+              `<sub>[로그](${runUrl})</sub>`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body?.includes(MARKER));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }

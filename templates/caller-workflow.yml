@@ -1,0 +1,98 @@
+# Claude Code Review - Caller Workflow
+#
+# 이 파일을 레포의 .github/workflows/claude-review.yml에 복사하세요.
+#
+# 필수 사전 설정:
+#   1. Org secret: CLAUDE_CODE_OAUTH_TOKEN
+#   2. GitHub App: https://github.com/apps/claude 설치
+#
+# 커스터마이징:
+#   - additional_exclude: 레포별 추가 제외 패턴
+#   - model: Claude 모델 (기본: claude-sonnet-4-6)
+#   - review_language: 리뷰 언어 (기본: ko)
+#   - 레포별 리뷰 규칙: .github/claude-review-rules.md 파일 생성
+
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  # Job 1: Auto-review (reusable workflow 호출)
+  auto-review:
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    uses: planfit/.github/.github/workflows/claude-review.yml@v1
+    with:
+      trigger_action: ${{ github.event.action }}
+      pr_number: ${{ github.event.pull_request.number }}
+      pr_title: ${{ github.event.pull_request.title }}
+      repo_name: ${{ github.event.repository.name }}
+      repo_owner: ${{ github.repository_owner }}
+      # --- 레포별 커스텀 (필요 시 주석 해제) ---
+      # additional_exclude: '^src/locales/|^migrations/'
+      # model: 'claude-sonnet-4-6'
+      # review_language: 'ko'
+    secrets: inherit
+
+  # Job 2: Interactive (@claude 멘션 대응)
+  interactive:
+    if: >
+      (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') &&
+      contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+
+    concurrency:
+      group: claude-interactive-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Interactive
+        id: claude-interactive
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          trigger_phrase: '@claude'
+          claude_args: '--model claude-sonnet-4-6 --max-turns 15'
+
+      - name: Handle interactive failure
+        if: steps.claude-interactive.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = context.payload.issue?.number || context.payload.pull_request?.number;
+            if (!issueNumber) return;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: [
+                '⚠️ **Claude Code 응답 실패**',
+                '',
+                'Rate limit에 도달했거나 일시적 오류가 발생했습니다.',
+                '잠시 후 다시 `@claude`로 멘션해주세요.',
+              ].join('\n'),
+            });
