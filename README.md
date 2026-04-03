@@ -6,6 +6,8 @@ Planfit organization 공용 설정 및 reusable workflows.
 
 AI 기반 PR 자동 리뷰 시스템. 모든 레포에서 사용 가능합니다.
 
+> **팀원용 온보딩 가이드**: [docs/onboarding-guide.md](docs/onboarding-guide.md)
+
 ### 빠른 시작
 
 레포 루트에서 실행:
