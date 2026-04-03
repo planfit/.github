@@ -1,6 +1,6 @@
 # Claude Review Rules
 
-> 이 파일을 `.github/claude-review-rules.md`에 배치하세요.
+> 이 파일을 `.claude/review-rules.md`에 배치하세요.
 > 레포에 맞게 수정한 후 사용합니다.
 > 이 파일이 없으면 CLAUDE.md 기반으로 리뷰합니다.
 

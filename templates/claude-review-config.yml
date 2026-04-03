@@ -1,0 +1,23 @@
+# .claude-review.yml — Claude Code Review 설정
+#
+# 이 파일을 레포 루트에 배치하세요.
+# 모든 필드는 선택사항이며, 없으면 기본값이 사용됩니다.
+
+# Claude 모델 (기본: claude-sonnet-4-6)
+# model: claude-sonnet-4-6
+
+# 리뷰 언어 (기본: ko)
+# language: ko
+
+# 에이전트 최대 턴 수 (기본: 20)
+# max_turns: 20
+
+# 최대 diff 크기 bytes (기본: 204800)
+# diff_size_limit: 204800
+
+# 추가 파일 제외 패턴 (grep -E 형식)
+# 기본 제외: .json, .svg, .png, .jpg, .gif, package-lock.json
+# exclude:
+#   - '^src/locales/'
+#   - '^migrations/'
+#   - '^docs/'

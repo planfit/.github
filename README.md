@@ -17,8 +17,9 @@ curl -sL https://raw.githubusercontent.com/planfit/.github/v1/scripts/setup-clau
 또는 수동 설정:
 
 1. `templates/caller-workflow.yml`을 레포의 `.github/workflows/claude-review.yml`로 복사
-2. (선택) `templates/claude-review-rules-example.md`를 `.github/claude-review-rules.md`로 복사 후 수정
-3. 커밋 & 푸시
+2. (선택) `.claude-review.yml`을 레포 루트에 생성하여 설정 커스터마이징
+3. (선택) `.claude/review-rules.md`를 생성하여 레포별 리뷰 규칙 정의
+4. 커밋 & 푸시
 
 ### 사전 요구사항
 
@@ -40,22 +41,39 @@ curl -sL https://raw.githubusercontent.com/planfit/.github/v1/scripts/setup-clau
 
 ### 커스터마이징
 
-#### Caller Workflow Inputs
+#### 설정 파일 (`.claude-review.yml`)
 
-| Input | 기본값 | 설명 |
-|-------|--------|------|
-| `additional_exclude` | `''` | 추가 파일 제외 패턴 (grep -E) |
+레포 루트에 `.claude-review.yml`을 생성하면 리뷰 설정을 커스터마이징할 수 있습니다.
+파일이 없으면 기본값이 사용됩니다.
+
+```yaml
+# .claude-review.yml
+language: ko
+model: claude-sonnet-4-6
+max_turns: 20
+diff_size_limit: 204800
+
+exclude:
+  - '^src/locales/'
+  - '^migrations/'
+```
+
+| 필드 | 기본값 | 설명 |
+|------|--------|------|
 | `model` | `claude-sonnet-4-6` | Claude 모델 |
+| `language` | `ko` | 리뷰 언어 (`ko` 또는 `en`) |
 | `max_turns` | `20` | 최대 에이전트 턴 수 |
-| `review_language` | `ko` | 리뷰 언어 (`ko` 또는 `en`) |
 | `diff_size_limit` | `204800` | 최대 diff 크기 (bytes) |
+| `exclude` | `[]` | 추가 파일 제외 패턴 (grep -E) |
 
-#### 레포별 리뷰 규칙
+#### 레포별 리뷰 규칙 (`.claude/review-rules.md`)
 
-`.github/claude-review-rules.md` 파일을 레포에 생성하면, Claude가 해당 규칙을 우선 적용합니다.
+`.claude/review-rules.md` 파일을 레포에 생성하면, Claude가 해당 규칙을 우선 적용합니다.
 파일이 없으면 CLAUDE.md 기반으로 리뷰합니다.
 
-예시: `templates/claude-review-rules-example.md`
+> 하위 호환: `.github/claude-review-rules.md`도 지원됩니다 (`.claude/review-rules.md` 우선).
+
+예시: `templates/review-rules-example.md`
 
 ### 자동 스킵 조건
 
@@ -72,10 +90,7 @@ curl -sL https://raw.githubusercontent.com/planfit/.github/v1/scripts/setup-clau
 | `*.svg/png/jpg/gif` | 이미지 |
 | `package-lock.json` | 자동 생성 |
 
-`additional_exclude`로 레포별 추가 제외 가능:
-```yaml
-additional_exclude: '^src/locales/|^migrations/|^docs/'
-```
+`exclude`로 레포별 추가 제외 가능.
 
 ### 버전 관리
 
@@ -103,8 +118,9 @@ PR 생성/업데이트
   │
   ├── Caller Workflow (각 레포)
   │   ├── auto-review job ──→ Reusable Workflow (planfit/.github)
+  │   │                        ├── Config 로드 (.claude-review.yml)
   │   │                        ├── Diff 추출 + 필터링
-  │   │                        ├── 리뷰 규칙 로드
+  │   │                        ├── 리뷰 규칙 로드 (.claude/review-rules.md)
   │   │                        ├── 이전 리뷰 resolve
   │   │                        ├── Claude Review (primary)
   │   │                        ├── Claude Review (backup fallback)
@@ -112,6 +128,10 @@ PR 생성/업데이트
   │   │
   │   └── interactive job ──→ claude-code-action (직접 실행)
   │                            └── @claude 멘션 대응
+  │
+  ├── Config (레포별)
+  │   ├── .claude-review.yml (설정)
+  │   └── .claude/review-rules.md (리뷰 규칙)
   │
   └── Secrets (Org-level)
       ├── CLAUDE_CODE_OAUTH_TOKEN

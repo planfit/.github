@@ -16,7 +16,9 @@ set -e
 TEMPLATE_BASE="https://raw.githubusercontent.com/planfit/.github/v1/templates"
 WORKFLOW_DIR=".github/workflows"
 WORKFLOW_FILE="$WORKFLOW_DIR/claude-review.yml"
-RULES_FILE=".github/claude-review-rules.md"
+CONFIG_FILE=".claude-review.yml"
+RULES_DIR=".claude"
+RULES_FILE="$RULES_DIR/review-rules.md"
 
 echo ""
 echo "🤖 Claude Code Review 설정"
@@ -55,42 +57,33 @@ else
 fi
 echo "   ✅ $WORKFLOW_FILE 생성 완료"
 
-# 3. 추가 제외 패턴 입력 (선택)
+# 3. 설정 파일 생성 (선택)
 echo ""
-read -p "추가 제외 패턴이 있나요? (예: '^src/locales/|^migrations/', 없으면 Enter): " EXCLUDE
-if [ -n "$EXCLUDE" ]; then
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-    sed -i '' "s|# additional_exclude:.*|additional_exclude: '$EXCLUDE'|" "$WORKFLOW_FILE"
+read -p "설정 파일(.claude-review.yml)을 생성할까요? (y/N): " CREATE_CONFIG
+if [ "$CREATE_CONFIG" = "y" ] || [ "$CREATE_CONFIG" = "Y" ]; then
+  echo "📥 설정 파일 생성..."
+  if command -v curl &>/dev/null; then
+    curl -sL "$TEMPLATE_BASE/claude-review-config.yml" -o "$CONFIG_FILE"
   else
-    sed -i "s|# additional_exclude:.*|additional_exclude: '$EXCLUDE'|" "$WORKFLOW_FILE"
+    wget -qO "$CONFIG_FILE" "$TEMPLATE_BASE/claude-review-config.yml"
   fi
-  echo "   ✅ 제외 패턴 적용: $EXCLUDE"
+  echo "   ✅ $CONFIG_FILE 생성 완료"
+  echo "   ✏️  레포에 맞게 수정하세요."
 fi
 
 # 4. 리뷰 규칙 파일 생성 (선택)
 echo ""
-read -p "레포별 리뷰 규칙 파일을 생성할까요? (y/N): " CREATE_RULES
+read -p "리뷰 규칙 파일(.claude/review-rules.md)을 생성할까요? (y/N): " CREATE_RULES
 if [ "$CREATE_RULES" = "y" ] || [ "$CREATE_RULES" = "Y" ]; then
+  mkdir -p "$RULES_DIR"
   echo "📥 리뷰 규칙 템플릿 생성..."
   if command -v curl &>/dev/null; then
-    curl -sL "$TEMPLATE_BASE/claude-review-rules-example.md" -o "$RULES_FILE"
+    curl -sL "$TEMPLATE_BASE/review-rules-example.md" -o "$RULES_FILE"
   else
-    wget -qO "$RULES_FILE" "$TEMPLATE_BASE/claude-review-rules-example.md"
+    wget -qO "$RULES_FILE" "$TEMPLATE_BASE/review-rules-example.md"
   fi
   echo "   ✅ $RULES_FILE 생성 완료"
   echo "   ✏️  레포에 맞게 수정하세요."
-fi
-
-# 5. 리뷰 언어 선택
-echo ""
-read -p "리뷰 언어를 변경할까요? (기본: ko, en으로 변경하려면 'en' 입력): " LANG
-if [ "$LANG" = "en" ]; then
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-    sed -i '' "s|# review_language: 'ko'|review_language: 'en'|" "$WORKFLOW_FILE"
-  else
-    sed -i "s|# review_language: 'ko'|review_language: 'en'|" "$WORKFLOW_FILE"
-  fi
-  echo "   ✅ 리뷰 언어: English"
 fi
 
 echo ""
@@ -99,14 +92,17 @@ echo "✅ Claude Code Review 설정 완료!"
 echo "==============================="
 echo ""
 echo "📋 다음 단계:"
-echo "  1. $WORKFLOW_FILE 확인 및 커스텀"
-if [ "$CREATE_RULES" = "y" ] || [ "$CREATE_RULES" = "Y" ]; then
-  echo "  2. $RULES_FILE 수정"
+echo "  1. $WORKFLOW_FILE 확인"
+if [ "$CREATE_CONFIG" = "y" ] || [ "$CREATE_CONFIG" = "Y" ]; then
+  echo "  2. $CONFIG_FILE 수정 (모델, 언어, 제외 패턴 등)"
 fi
-echo "  3. Org secret 확인: CLAUDE_CODE_OAUTH_TOKEN"
+if [ "$CREATE_RULES" = "y" ] || [ "$CREATE_RULES" = "Y" ]; then
+  echo "  3. $RULES_FILE 수정 (리뷰 규칙)"
+fi
+echo "  4. Org secret 확인: CLAUDE_CODE_OAUTH_TOKEN"
 echo "     (GitHub → Org Settings → Secrets → Actions)"
-echo "  4. GitHub App 설치 확인: https://github.com/apps/claude"
-echo "  5. 커밋 & 푸시 (main/default branch에 merge)"
+echo "  5. GitHub App 설치 확인: https://github.com/apps/claude"
+echo "  6. 커밋 & 푸시 (main/default branch에 merge)"
 echo ""
 echo "📖 자세한 문서: https://github.com/planfit/.github#readme"
 echo ""

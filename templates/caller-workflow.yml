@@ -7,10 +7,8 @@
 #   2. GitHub App: https://github.com/apps/claude 설치
 #
 # 커스터마이징:
-#   - additional_exclude: 레포별 추가 제외 패턴
-#   - model: Claude 모델 (기본: claude-sonnet-4-6)
-#   - review_language: 리뷰 언어 (기본: ko)
-#   - 레포별 리뷰 규칙: .github/claude-review-rules.md 파일 생성
+#   - .claude-review.yml (레포 루트): 모델, 언어, 제외 패턴 등 설정
+#   - .claude/review-rules.md: 레포별 리뷰 규칙
 
 name: Claude Code Review
 
@@ -38,10 +36,6 @@ jobs:
       pr_title: ${{ github.event.pull_request.title }}
       repo_name: ${{ github.event.repository.name }}
       repo_owner: ${{ github.repository_owner }}
-      # --- 레포별 커스텀 (필요 시 주석 해제) ---
-      # additional_exclude: '^src/locales/|^migrations/'
-      # model: 'claude-sonnet-4-6'
-      # review_language: 'ko'
     secrets: inherit
 
   # Job 2: Interactive (@claude 멘션 대응)
