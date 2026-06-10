@@ -158,8 +158,19 @@ jobs:
             echo "has_rules=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Step 6: 이전 Claude 리뷰 스레드 resolve (synchronize 시에만)
-      - name: Resolve previous Claude reviews
+          # L2 학습 메모리 로드 (opt-in — 파일 없으면 동작 변화 없음)
+          if [ -f ".claude/review-memory.md" ]; then
+            head -c 51200 ".claude/review-memory.md" > /tmp/review-memory.md
+            echo "has_memory=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_memory=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Step 6: 이전 Claude 리뷰 캡처(carry-forward) → resolve (synchronize 시에만)
+      #  - 기존엔 직전 리뷰를 읽지 않고 전부 resolve(컨텍스트 폐기)했음.
+      #  - 이제 덤프(/tmp/prior-review.md)로 carry-forward 후 resolve → 증분 리뷰(L3).
+      - name: Capture & resolve previous Claude reviews
+        id: prior-review
         if: >
           inputs.trigger_action == 'synchronize' &&
           steps.skip-check.outputs.should_skip != 'true' &&
@@ -171,7 +182,7 @@ jobs:
           OWNER="${{ inputs.repo_owner }}"
           REPO="${{ inputs.repo_name }}"
 
-          # Fetch unresolved review threads with first comment body
+          # 스레드 + 파일/라인 + 전체 코멘트(개발자 답글 포함) 조회
           THREADS=$(gh api graphql -f query='
             query($owner: String!, $repo: String!, $pr: Int!) {
               repository(owner: $owner, name: $repo) {
@@ -180,8 +191,10 @@ jobs:
                     nodes {
                       id
                       isResolved
-                      comments(first: 1) {
-                        nodes { body }
+                      path
+                      line
+                      comments(first: 20) {
+                        nodes { author { login } body }
                       }
                     }
                   }
@@ -190,7 +203,23 @@ jobs:
             }
           ' -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUM")
 
-          # Filter Claude threads (by marker) and resolve
+          # Claude 스레드(마커 보유)만 골라 carry-forward 덤프 생성
+          echo "$THREADS" | jq -r '
+            .data.repository.pullRequest.reviewThreads.nodes[]
+            | select(.comments.nodes[0].body | contains("<!-- claude-review -->"))
+            | "### \(.path):\(.line // "?") (resolved=\(.isResolved))\n" +
+              ([ .comments.nodes[]
+                 | "- [\(.author.login)] " + (.body | gsub("<!-- claude-review -->"; "") | gsub("\n"; " "))
+               ] | join("\n"))
+          ' > /tmp/prior-review.md || true
+
+          if [ -s /tmp/prior-review.md ]; then
+            echo "has_prior=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_prior=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # 덤프 후 미해결 Claude 스레드 resolve (스레드 누적 방지)
           echo "$THREADS" | jq -r '
             .data.repository.pullRequest.reviewThreads.nodes[]
             | select(.isResolved == false)
@@ -227,6 +256,8 @@ jobs:
             - `/tmp/pr-diff.txt` — PR diff
             - `/tmp/changed-files.txt` — 리뷰 대상 파일 목록
             ${{ steps.load-rules.outputs.has_rules == 'true' && '- `/tmp/review-rules.md` — 이 레포의 리뷰 규칙' || '' }}
+            ${{ steps.load-rules.outputs.has_memory == 'true' && '- `/tmp/review-memory.md` — 누적 학습 메모리(오탐·예외)' || '' }}
+            ${{ steps.prior-review.outputs.has_prior == 'true' && '- `/tmp/prior-review.md` — 직전 리뷰 코멘트 + 개발자 답글(증분용)' || '' }}
 
             ## 작업 순서 (순서대로 실행하라)
             1. `/tmp/pr-diff.txt`를 Read로 읽어 변경사항을 파악하라
@@ -254,6 +285,12 @@ jobs:
                   - body: "🤖 Claude Code Review 완료"
 
             6. 이슈가 없으면 리뷰를 생성하지 않음 (아무 도구도 호출하지 마라)
+
+            ## 학습 메모리 (L2 — 있으면 반드시 준수)
+            ${{ steps.load-rules.outputs.has_memory == 'true' && '코멘트 작성 전 `/tmp/review-memory.md`를 Read로 읽어라. 변경 파일이 각 항목의 scope(glob)에 매칭되면 그 학습을 강한 제약으로 적용하라 — 메모리가 "지적하지 마라"고 명시한 패턴은 절대 코멘트하지 마라. 이것은 과거 PR에서 개발자가 확인한 오탐·예외다.' || '학습 메모리 없음.' }}
+
+            ## 이전 리뷰 컨텍스트 (L3 — 있으면 증분 리뷰)
+            ${{ steps.prior-review.outputs.has_prior == 'true' && '`/tmp/prior-review.md`를 Read로 읽어라. 직전 리뷰에서 네가 남긴 지적과 개발자 답글이다. (a) 이미 수정/반영된 지적은 다시 하지 마라. (b) 개발자가 의도·오탐이라 답글로 반박한 지적은 다시 하지 말고, 반복되면 review-memory.md 등록 후보임을 인지하라. (c) 여전히 유효한 미해결 이슈만 다시 올려라. 전체를 from-scratch로 재지적하지 마라.' || '이전 리뷰 없음(최초 리뷰).' }}
 
             ## 중복 방지 (엄격히 지킬 것)
             - 같은 파일에서 같은 유형 이슈 → 첫 발생 위치에 1개만 코멘트, 본문에 "Line X, Y에서도 동일" 나열
@@ -295,6 +332,8 @@ jobs:
             - `/tmp/pr-diff.txt` — PR diff
             - `/tmp/changed-files.txt` — 리뷰 대상 파일 목록
             ${{ steps.load-rules.outputs.has_rules == 'true' && '- `/tmp/review-rules.md` — 이 레포의 리뷰 규칙' || '' }}
+            ${{ steps.load-rules.outputs.has_memory == 'true' && '- `/tmp/review-memory.md` — 누적 학습 메모리(오탐·예외)' || '' }}
+            ${{ steps.prior-review.outputs.has_prior == 'true' && '- `/tmp/prior-review.md` — 직전 리뷰 코멘트 + 개발자 답글(증분용)' || '' }}
 
             ## 작업 순서 (순서대로 실행하라)
             1. `/tmp/pr-diff.txt`를 Read로 읽어 변경사항을 파악하라
@@ -322,6 +361,12 @@ jobs:
                   - body: "🤖 Claude Code Review 완료"
 
             6. 이슈가 없으면 리뷰를 생성하지 않음 (아무 도구도 호출하지 마라)
+
+            ## 학습 메모리 (L2 — 있으면 반드시 준수)
+            ${{ steps.load-rules.outputs.has_memory == 'true' && '코멘트 작성 전 `/tmp/review-memory.md`를 Read로 읽어라. 변경 파일이 각 항목의 scope(glob)에 매칭되면 그 학습을 강한 제약으로 적용하라 — 메모리가 "지적하지 마라"고 명시한 패턴은 절대 코멘트하지 마라. 이것은 과거 PR에서 개발자가 확인한 오탐·예외다.' || '학습 메모리 없음.' }}
+
+            ## 이전 리뷰 컨텍스트 (L3 — 있으면 증분 리뷰)
+            ${{ steps.prior-review.outputs.has_prior == 'true' && '`/tmp/prior-review.md`를 Read로 읽어라. 직전 리뷰에서 네가 남긴 지적과 개발자 답글이다. (a) 이미 수정/반영된 지적은 다시 하지 마라. (b) 개발자가 의도·오탐이라 답글로 반박한 지적은 다시 하지 말고, 반복되면 review-memory.md 등록 후보임을 인지하라. (c) 여전히 유효한 미해결 이슈만 다시 올려라. 전체를 from-scratch로 재지적하지 마라.' || '이전 리뷰 없음(최초 리뷰).' }}
 
             ## 중복 방지 (엄격히 지킬 것)
             - 같은 파일에서 같은 유형 이슈 → 첫 발생 위치에 1개만 코멘트, 본문에 "Line X, Y에서도 동일" 나열

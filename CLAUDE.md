@@ -14,8 +14,8 @@ Caller Workflow (각 레포)                Reusable Workflow (이 레포)
   ├── auto-review job ──────────────→    ├── Skip 조건 체크 (PR 제목)
   │                                      ├── Config 로드 (.claude-review.yml)
   │                                      ├── Diff 추출 + 파일 필터링
-  │                                      ├── 리뷰 규칙 로드 (.claude/review-rules.md)
-  │                                      ├── 이전 리뷰 스레드 resolve (synchronize 시)
+  │                                      ├── 리뷰 규칙 로드 (.claude/review-rules.md + review-memory.md)
+  │                                      ├── 이전 리뷰 캡처→carry-forward→resolve (synchronize 시)
   │                                      ├── Claude Review (primary token)
   │                                      ├── Claude Review (backup token fallback)
   │                                      └── Summary sticky comment
@@ -32,11 +32,13 @@ Caller Workflow (각 레포)                Reusable Workflow (이 레포)
 | 파일 | 용도 | 필수 |
 |------|------|------|
 | `.claude-review.yml` (레포 루트) | 설정 (model, language, exclude 등) | 선택 |
-| `.claude/review-rules.md` | 리뷰 규칙 (프롬프트에 주입) | 선택 |
+| `.claude/review-rules.md` | 정적 리뷰 규칙 (L1, 프롬프트에 주입) | 선택 |
+| `.claude/review-memory.md` | 학습 메모리 (L2, 누적 오탐·예외) | 선택 |
 
 - 설정 파일 없으면 기본값 사용
 - 리뷰 규칙 없으면 CLAUDE.md 기반 폴백
 - 하위 호환: `.github/claude-review-rules.md`도 지원 (`.claude/review-rules.md` 우선)
+- **지속 컨텍스트 시스템**: 3-layer(L1 rules / L2 memory / L3 PR 스레드 carry-forward). 설계 SSOT는 `docs/context-memory-design.md`. L2는 opt-in(파일 없으면 동작 변화 0)
 
 ## Key Files
 
@@ -63,6 +65,8 @@ Caller Workflow (각 레포)                Reusable Workflow (이 레포)
 ## Editing Guidelines
 
 - Reusable workflow 수정 시: primary/backup step의 프롬프트가 **동일해야 함** (YAML anchor 미지원으로 수동 동기화 필요)
+- 프롬프트가 참조하는 step output(`steps.load-rules.outputs.has_memory`, `steps.prior-review.outputs.has_prior`) 추가/변경 시: primary/backup 양쪽 + 해당 step 정의 모두 갱신
+- 지속 컨텍스트(L2/L3) 동작 변경 시: `docs/context-memory-design.md` 갱신 + canary(한 레포 SHA 핀 검증) 후 `@v1` 이동
 - Summary comment의 마커 문자열 변경 시: Step 9/10 모두 업데이트 필요
 - Config 파싱 로직 변경 시: Step 3 (Load config)의 shell 파싱 코드 수정
 - `@v1` 태그 업데이트: `git tag -f v1 && git push origin v1 --force`
