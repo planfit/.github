@@ -1,0 +1,112 @@
+name: Claude Review Learn (Reusable)
+
+# 학습 루프 (L2 쓰기) — 개발자가 `@claude learn:` / `@claude dismiss`로 남긴 피드백을
+# review-memory.md 엔트리로 distill → **큐레이션 PR**로 제안 (자동 머지 금지, 사람 게이트).
+#
+# 호출: 각 레포 caller의 issue_comment / pull_request_review_comment 이벤트에서
+#       `@claude learn` 또는 `@claude dismiss` 포함 시.
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: 'PR number'
+        required: true
+        type: number
+      comment_body:
+        description: '트리거 코멘트 본문'
+        required: true
+        type: string
+      comment_author:
+        description: '코멘트 작성자 login'
+        required: true
+        type: string
+      repo_name:
+        description: 'Repository name'
+        required: true
+        type: string
+      repo_owner:
+        description: 'Repository owner'
+        required: true
+        type: string
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  learn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write       # 큐레이션 브랜치 push
+      pull-requests: write  # 큐레이션 PR 생성 + 원본 PR 코멘트
+      issues: write
+      id-token: write
+
+    concurrency:
+      group: claude-learn-${{ inputs.repo_name }}-${{ inputs.pr_number }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Distill learning → curation PR
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: >-
+            --model claude-sonnet-4-6
+            --max-turns 15
+            --allowedTools
+            "Read,Glob,Grep,mcp__github__create_branch,mcp__github__create_or_update_file,mcp__github__create_pull_request,mcp__github__add_issue_comment"
+          prompt: |
+            개발자가 PR #${{ inputs.pr_number }}에 리뷰 학습 피드백을 남겼다.
+            이를 `.claude/review-memory.md`의 학습 엔트리(RM-NNN)로 distill하여
+            **큐레이션 PR**로 제안하라. 절대 자동 머지하지 마라 — 사람이 검토한다.
+
+            ## 트리거 코멘트
+            - 작성자: @${{ inputs.comment_author }}
+            - 본문:
+            """
+            ${{ inputs.comment_body }}
+            """
+
+            ## 작업 순서
+            1. `.claude/review-memory.md`를 Read로 읽어라.
+               - 없으면 헤더부터 새로 만든다(형식은 아래 "엔트리 형식" 참고).
+               - 있으면 가장 큰 `RM-NNN`을 찾아 다음 번호를 정한다.
+
+            2. 코멘트를 **한 개의 자연어 학습 규칙**으로 distill하라:
+               - "무엇을 지적하지 마라/어떻게 판단하라"를 1~2문장 자연어로 (regex·기계규칙 금지).
+               - 가능한 한 좁은 `scope`(glob)를 추론하라. 불명확하면 `**/*` 대신 코멘트 맥락의 파일/디렉토리로 한정.
+               - 기존 엔트리와 취지가 겹치면 **새로 만들지 말고**, 그 사실을 큐레이션 PR 본문에 적고 중복 후보로 표시하라.
+
+            3. 새 브랜치 `claude/learn-${{ inputs.pr_number }}-RM` 계열로 생성하고
+               `.claude/review-memory.md`에 distill한 엔트리를 append하라.
+
+            4. base=기본 브랜치로 큐레이션 PR을 생성하라:
+               - title: `chore(review-memory): RM-NNN <요약>`
+               - body: 원본 PR #${{ inputs.pr_number }} 링크, 트리거 코멘트 인용, distill 근거,
+                 그리고 "⚠️ 큐레이션 필요 — 이 학습이 타당한지 사람이 검토 후 머지" 명시.
+
+            5. 원본 PR #${{ inputs.pr_number }}에 `mcp__github__add_issue_comment`로
+               큐레이션 PR 링크를 1번만 남겨라.
+
+            ## 엔트리 형식
+            ```
+            ### RM-NNN · <짧은 제목>
+            - rule: <지적하지 말 것 / 판단 기준, 자연어 1~2문장>
+            - scope: <glob>
+            - origin: PR #${{ inputs.pr_number }} · @${{ inputs.comment_author }} · learn
+            - uses: 0 · last_used: —
+            ```
+
+            ## 규칙
+            - 한국어로 작성.
+            - 코멘트가 학습이 아니라 단순 질문/잡담이면(예: 코드 질문) 아무 것도 만들지 말고,
+              원본 PR에 "학습으로 등록할 내용이 아니라 판단되어 건너뜀"이라고만 코멘트하라.
+            - 큐레이션 PR은 **절대 머지하지 마라**.
