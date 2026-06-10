@@ -55,14 +55,15 @@ jobs:
           fetch-depth: 1
 
       - name: Distill learning → curation PR
+        id: learn-claude
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: >-
             --model claude-sonnet-4-6
-            --max-turns 15
+            --max-turns 30
             --allowedTools
-            "Read,Glob,Grep,mcp__github__create_branch,mcp__github__create_or_update_file,mcp__github__create_pull_request,mcp__github__add_issue_comment"
+            "Read,Glob,Grep,mcp__github__create_branch,mcp__github__push_files,mcp__github__create_or_update_file,mcp__github__create_pull_request,mcp__github__get_pull_request,mcp__github__add_issue_comment"
           prompt: |
             개발자가 PR #${{ inputs.pr_number }}에 리뷰 학습 피드백을 남겼다.
             이를 `.claude/review-memory.md`의 학습 엔트리(RM-NNN)로 distill하여
