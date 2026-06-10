@@ -136,6 +136,22 @@ PR 코멘트에 `@claude`를 멘션하면 응답합니다.
 @claude 이 변경이 기존 API에 영향을 주나요?
 ```
 
+### 학습 / 오탐 등록 (review-memory)
+
+리뷰가 같은 오탐을 반복하거나 팀 예외를 알려주고 싶으면, PR 코멘트로 학습을 적립합니다.
+
+```
+@claude learn: experiments 디렉토리의 실험 ID 버전 접미사 숫자는 지적하지 마라
+@claude dismiss: 이건 의도된 동작 — 네이티브 link 미사용이라 require가 정답
+```
+
+- 코멘트가 한 개의 학습 규칙으로 distill되어 `.claude/review-memory.md`에 추가하는 **큐레이션 PR**이 자동 생성됩니다.
+- ⚠️ **봇이 바로 반영하지 않습니다** — 사람이 큐레이션 PR을 검토·머지해야 다음 리뷰부터 적용됩니다.
+- 머지되면 이후 리뷰에서 해당 scope 파일은 그 오탐을 다시 지적하지 않습니다.
+- 개념·포맷 상세: `planfit:review-memory` 스킬 / `docs/context-memory-design.md`.
+
+> 👍👎 리액션은 Anthropic 자체 튜닝용으로만 수집되어 **우리 레포 리뷰엔 반영되지 않습니다**. 학습은 위 `@claude learn`/`dismiss` 방식으로 남기세요.
+
 ### 리뷰 건너뛰기
 
 PR 제목에 아래 키워드를 포함하면 리뷰를 건너뜁니다:
