@@ -111,16 +111,3 @@ jobs:
             - 코멘트가 학습이 아니라 단순 질문/잡담이면(예: 코드 질문) 아무 것도 만들지 말고,
               원본 PR에 "학습으로 등록할 내용이 아니라 판단되어 건너뜀"이라고만 코멘트하라.
             - 큐레이션 PR은 **절대 머지하지 마라**.
-
-      # [임시 진단용] 에이전트 transcript를 로그로 덤프 — 원인 파악 후 제거
-      - name: Dump execution transcript (diagnostic)
-        if: always() && steps.learn-claude.outputs.execution_file != ''
-        run: |
-          echo "===== EXECUTION FILE: ${{ steps.learn-claude.outputs.execution_file }} ====="
-          jq -r '.[] | select(.type=="assistant" or .type=="user") | .message.content[]? |
-                 if .type=="tool_use" then "TOOL_USE \(.name): \(.input|tostring)"
-                 elif .type=="tool_result" then "TOOL_RESULT (err=\(.is_error)): \((.content|tostring)[0:500])"
-                 elif .type=="text" then "TEXT: \(.text[0:500])"
-                 else empty end' \
-            "${{ steps.learn-claude.outputs.execution_file }}" 2>/dev/null \
-            || cat "${{ steps.learn-claude.outputs.execution_file }}"
